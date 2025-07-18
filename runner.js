@@ -183,7 +183,7 @@ async function loop() {
             consecutiveErrors++;
             console.error(`Error in main loop (attempt ${consecutiveErrors}):`, error);
 
-            if (consecutiveErrors >= 5) {
+            if (consecutiveErrors >= 20) {
                 console.error("Too many consecutive errors, exiting...");
                 process.exit(1);
             }
