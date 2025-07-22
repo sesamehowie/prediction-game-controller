@@ -129,7 +129,6 @@ async function play(vars) {
         try {
             const tx = await gameContract.executeRound(updateData, {
                 value: updateFee,
-                gasLimit: 1000000
             });
             console.log("Transaction sent, waiting for confirmation...");
             const receipt = await tx.wait();
