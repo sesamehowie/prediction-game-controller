@@ -7,41 +7,35 @@ async function waitForTimestamp(provider, targetTimestamp, buffer = 2) {
     while (true) {
         const currentBlock = await provider.getBlock("latest");
         const currentTimestamp = BigInt(currentBlock.timestamp);
-        const target = BigInt(targetTimestamp);
+        const target = BigInt(targetTimestamp) - 1n;
 
         if (currentTimestamp >= target) {
-            console.log(`Target timestamp reached. Current: ${currentTimestamp.toString()}, Target: ${target.toString()}`);
+            console.log(`Target timestamp reached. Current: ${currentTimestamp}, Target: ${target}`);
             break;
         }
 
-        const timeToWait = Number(target - currentTimestamp) + buffer;
-        console.log(`Waiting ${timeToWait} seconds until timestamp ${target.toString()}...`);
-        await sleep(Math.min(timeToWait, 10));
+        const timeToWaitBigInt = target - currentTimestamp;
+        const timeToWait = Number(timeToWaitBigInt > 10n ? 10n : timeToWaitBigInt); // ограничим максимум 10 секунд
+
+        console.log(`Current ts ${currentTimestamp} Waiting ${timeToWait} seconds until timestamp ${target}...`);
+        await sleep(timeToWait);
     }
 }
 
-async function play(vars) {
+export async function play(vars) {
     const [operatorKey, monadRpc, predictionGameAddress, pythOracleAddress, priceFeedId, abiPath, abi, pythAbi] = vars;
 
-    if (operatorKey && monadRpc && predictionGameAddress && pythOracleAddress && priceFeedId && abiPath && abi && pythAbi) {
-        console.log("Variables successfully loaded!");
-    }
-
-    const provider = new ethers.JsonRpcProvider(monadRpc);
+    const provider = new ethers.providers.JsonRpcProvider(monadRpc);
     const operatorWallet = new ethers.Wallet(operatorKey, provider);
     const gameContract = new ethers.Contract(predictionGameAddress, abi, operatorWallet);
     const pythContract = new ethers.Contract(pythOracleAddress, pythAbi, operatorWallet);
-
-    if (provider && operatorWallet && gameContract && pythContract) {
-        console.log("Provider, wallet and contract instances successfully initialized!")
-    }
 
     try {
         const genesisStarted = await gameContract.genesisStarted();
         const genesisLocked = await gameContract.genesisLocked();
 
-        if (Number(genesisStarted) === 0) {
-            console.log("Genesis hadn't started yet, calling genesisStartRound...");
+        if (!genesisStarted) {
+            console.log("Genesis not started yet, calling genesisStartRound...");
             const tx = await gameContract.genesisStartRound();
             await tx.wait();
             console.log("GenesisStartRound - Completed!");
@@ -49,7 +43,7 @@ async function play(vars) {
             return;
         }
 
-        if (Number(genesisLocked) === 0) {
+        if (!genesisLocked) {
             console.log("Genesis not locked yet, waiting for lock timestamp...");
             const currentRoundId = await gameContract.currentRoundId();
             const round = await gameContract.rounds(currentRoundId);
@@ -69,23 +63,13 @@ async function play(vars) {
         console.log("Executing normal round...");
         const currentRoundId = await gameContract.currentRoundId();
         const currentRound = await gameContract.rounds(currentRoundId);
-        const previousRound = await gameContract.rounds(currentRoundId - 1n);
-
-        console.log(`Current Round ID: ${currentRoundId.toString()}`);
-        console.log(`Current Round Lock Timestamp: ${currentRound.lockTimestamp.toString()}`);
-        console.log(`Previous Round Close Timestamp: ${previousRound.closeTimestamp.toString()}`);
+        const previousRound = await gameContract.rounds(currentRoundId.sub(1)); // BigNumber
 
         const currentBlock = await provider.getBlock("latest");
         const currentTimestamp = BigInt(currentBlock.timestamp);
-        console.log(`Current Timestamp: ${currentTimestamp.toString()}`);
 
-        if (currentTimestamp < currentRound.lockTimestamp) {
+        if (currentTimestamp < BigInt(currentRound.lockTimestamp)) {
             await waitForTimestamp(provider, currentRound.lockTimestamp);
-        }
-
-        if (currentTimestamp < previousRound.closeTimestamp) {
-            console.log("Previous round not ready to close yet, waiting...");
-            await waitForTimestamp(provider, previousRound.closeTimestamp);
         }
 
         console.log("Fetching Pyth update data...");
@@ -110,7 +94,6 @@ async function play(vars) {
         }
 
         const updateData = ["0x".concat(hermesData)];
-        console.log("Got Hermes Data!");
 
         let updateFee;
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -126,6 +109,8 @@ async function play(vars) {
         }
 
         console.log("Executing round with updated price data...");
+        console.log("Current timestamp:",  Date.now());
+        console.log("Round lock timestamp:",  BigInt(currentRound.lockTimestamp));
         try {
             const tx = await gameContract.executeRound(updateData, {
                 value: updateFee,
@@ -133,10 +118,10 @@ async function play(vars) {
             console.log("Transaction sent, waiting for confirmation...");
             const receipt = await tx.wait();
 
-            console.log(`Successfully executed round! TX: ${receipt.hash}`);
+            console.log(`Successfully executed round! TX: ${receipt}`);
 
-            const updatedPreviousRound = await gameContract.rounds(currentRoundId - 1n);
-            console.log(`Previous round (${(currentRoundId - 1n).toString()}) close price: ${updatedPreviousRound.closePrice.toString()}`);
+            const updatedPreviousRound = await gameContract.rounds(currentRoundId.sub(1));
+            console.log(`Previous round (${currentRoundId.sub(1).toString()}) close price: ${updatedPreviousRound.closePrice.toString()}`);
 
             const updatedCurrentRound = await gameContract.rounds(currentRoundId);
             console.log(`Current round (${currentRoundId.toString()}) lock price: ${updatedCurrentRound.lockPrice.toString()}`);
@@ -162,6 +147,7 @@ async function play(vars) {
         return false;
     }
 }
+
 
 async function loop() {
     const vars = loadVariables();
