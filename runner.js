@@ -116,7 +116,7 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
     const wrappedGameContract = wrappedGameContracts[tokenConfig.name];
 
     const round = await gameContract.rounds(roundId);
-    const startTimestamp = new Date(parseInt(round[1]));
+    const startTimestamp = new Date(parseInt(round[1]) * 1000);
     const lockPrice = (parseInt(round[4]) / 10 ** tokenConfig.priceExpo).toFixed(4);
     const closePrice = (parseInt(round[5]) / 10 ** tokenConfig.priceExpo).toFixed(4);
     const betVolume = (parseInt(round[6]) / 10 ** monExpo).toFixed(4);
