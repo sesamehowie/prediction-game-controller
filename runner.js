@@ -80,7 +80,7 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 1500,
+  connectionTimeoutMillis: 15000,
   max: 10,
   idleTimeoutMillis: 3000,
   retryDelay: 1000,
@@ -163,10 +163,10 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
           winnerPosition === "pump" && parseFloat(userPumpAmount) > 0
             ? (userPumpAmount * 1.9).toFixed(4)
             : winnerPosition === "dump" && parseFloat(userDumpAmount) > 0
-            ? (parseFloat(userDumpAmount) * 1.9).toFixed(4)
-            : winnerPosition === "none"
-            ? parseFloat(userPumpAmount) + parseFloat(userDumpAmount)
-            : "0.0000";
+              ? (parseFloat(userDumpAmount) * 1.9).toFixed(4)
+              : winnerPosition === "none"
+                ? parseFloat(userPumpAmount) + parseFloat(userDumpAmount)
+                : "0.0000";
 
         return [roundId, userAddress, userPumpAmount, userDumpAmount, userPayout];
       });
@@ -220,6 +220,14 @@ INSERT INTO prediction_players (
         });
 
         console.log(`[${tokenConfig.name}] Inserted values into the players table.`);
+        for (const userData of insertUserData) {
+          const userAddress = userData[1];
+          const userPumpAmount = parseFloat(userData[2]);
+          const userDumpAmount = parseFloat(userData[3]);
+          const userPayout = parseFloat(userData[4]);
+
+          await updateGameStats(userAddress, 'prediction', userPumpAmount + userDumpAmount, userPayout);
+        }
       }
     } catch (err) {
       console.error(`[${tokenConfig.name}] Error:`, err);
@@ -229,6 +237,85 @@ INSERT INTO prediction_players (
   } catch (error) {
     console.error(`[${tokenConfig.name}] Error processing round ${roundId}: ${error}`);
     return false;
+  }
+}
+
+async function ensureUserProfile(walletAddress) {
+  try {
+    const normalizedAddress = walletAddress.toLowerCase();
+
+    const existingProfile = await pool.query(
+      'SELECT id FROM user_profiles WHERE wallet_address = $1',
+      [normalizedAddress]
+    );
+
+    if (existingProfile.rows.length > 0) {
+      return existingProfile.rows[0].id;
+    }
+
+    const newProfile = await pool.query(
+      'INSERT INTO user_profiles (wallet_address, created_at, updated_at) VALUES ($1, NOW(), NOW()) RETURNING id',
+      [normalizedAddress]
+    );
+
+    return newProfile.rows[0].id;
+  } catch (error) {
+    console.error("Error ensuring user profile:", error);
+    throw error;
+  }
+}
+
+async function updateGameStats(walletAddress, gameType, betAmount, winnings = 0) {
+  try {
+    const profileId = await ensureUserProfile(walletAddress);
+
+    try {
+      await pool.query(
+        `
+        INSERT INTO user_game_stats (
+          profile_id,
+          game_type,
+          total_bet_volume,
+          total_winnings,
+          games_played,
+          last_played
+        ) VALUES ($1, $2, $3, $4, 1, NOW())
+        ON CONFLICT ON CONSTRAINT user_game_stats_profile_game_unique
+        DO UPDATE SET
+          total_bet_volume = user_game_stats.total_bet_volume + $3,
+          total_winnings = user_game_stats.total_winnings + $4,
+          games_played = user_game_stats.games_played + 1,
+          last_played = NOW(),
+          updated_at = NOW()
+      `,
+        [profileId, gameType, betAmount, winnings],
+      );
+    } catch (_constraintError) {
+      await pool.query(
+        `
+        INSERT INTO user_game_stats (
+          profile_id,
+          game_type,
+          total_bet_volume,
+          total_winnings,
+          games_played,
+          last_played
+        ) VALUES ($1, $2, $3, $4, 1, NOW())
+        ON CONFLICT (profile_id, game_type)
+        DO UPDATE SET
+          total_bet_volume = user_game_stats.total_bet_volume + $3,
+          total_winnings = user_game_stats.total_winnings + $4,
+          games_played = user_game_stats.games_played + 1,
+          last_played = NOW(),
+          updated_at = NOW()
+      `,
+        [profileId, gameType, betAmount, winnings],
+      );
+    }
+
+    console.log(`Updated game stats for ${walletAddress}: bet=${betAmount}, winnings=${winnings}`);
+  } catch (error) {
+    console.error("Error updating game stats:", error);
   }
 }
 
@@ -508,8 +595,7 @@ export async function playAllTokens() {
     if (result.status === "fulfilled") {
       const { success, roundExecuted, roundCancelled, action, error } = result.value;
       console.log(
-        `[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${
-          action || "normal"
+        `[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${action || "normal"
         }`
       );
 
