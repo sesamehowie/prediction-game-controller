@@ -80,7 +80,7 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 1500,
+  connectionTimeoutMillis: 15000,
   max: 10,
   idleTimeoutMillis: 3000,
   retryDelay: 1000,
