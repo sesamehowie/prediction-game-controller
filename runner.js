@@ -11,9 +11,12 @@ dotenv.config();
 
 const betPositionNames = ["none", "pump", "dump"];
 const abiPath = "./abi/PredictionGame.json";
+const abiPathETH = "./abi/PredictionGameETH.json";
 const monadRpc = process.env.MONAD_RPC;
 const pythOracleAddress = process.env.PYTH_ORACLE_ADDRESS;
+
 const predictionGameAbi = readJson(abiPath);
+const predictionGameAbiETH = readJson(abiPathETH);
 const pythAbi = ["function getUpdateFee(bytes[] calldata updateData) external view returns (uint256 feeAmount)"];
 
 // Configuration for 3 tokens with separate private keys
@@ -26,6 +29,7 @@ const TOKENS = [
     priceFeedId: process.env.BTC_PRICE_FEED_ID,
     priceExpo: 8,
     operatorPrivateKey: process.env.BTC_OPERATOR_PRIVATE_KEY,
+    abi: predictionGameAbi,
   },
   {
     name: "ETH",
@@ -35,6 +39,7 @@ const TOKENS = [
     priceFeedId: process.env.ETH_PRICE_FEED_ID,
     priceExpo: 8,
     operatorPrivateKey: process.env.ETH_OPERATOR_PRIVATE_KEY,
+    abi: predictionGameAbiETH,
   },
   {
     name: "SOL",
@@ -44,6 +49,7 @@ const TOKENS = [
     priceFeedId: process.env.SOL_PRICE_FEED_ID,
     priceExpo: 8,
     operatorPrivateKey: process.env.SOL_OPERATOR_PRIVATE_KEY,
+    abi: predictionGameAbi
   },
 ];
 
@@ -63,10 +69,10 @@ TOKENS.forEach((token) => {
   operatorWallets[token.name] = new ethers.Wallet(token.operatorPrivateKey, provider);
 
   // Create game contracts with token-specific wallet
-  gameContracts[token.name] = new ethers.Contract(token.contractAddress, predictionGameAbi, operatorWallets[token.name]);
+  gameContracts[token.name] = new ethers.Contract(token.contractAddress, token.abi, operatorWallets[token.name]);
 
   // Create wrapped contracts for multicall
-  wrappedGameContracts[token.name] = new ethers.Contract(token.contractAddress, predictionGameAbi, multicallProvider);
+  wrappedGameContracts[token.name] = new ethers.Contract(token.contractAddress, token.abi, multicallProvider);
 
   // Create pyth contracts with token-specific wallet
   pythContracts[token.name] = new ethers.Contract(pythOracleAddress, pythAbi, operatorWallets[token.name]);
@@ -80,7 +86,7 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 15000,
+  connectionTimeoutMillis: 1500,
   max: 10,
   idleTimeoutMillis: 3000,
   retryDelay: 1000,
@@ -116,7 +122,7 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
     const wrappedGameContract = wrappedGameContracts[tokenConfig.name];
 
     const round = await gameContract.rounds(roundId);
-    const startTimestamp = new Date(parseInt(round[1]) * 1000);
+    const startTimestamp = new Date(parseInt(round[1]));
     const lockPrice = (parseInt(round[4]) / 10 ** tokenConfig.priceExpo).toFixed(4);
     const closePrice = (parseInt(round[5]) / 10 ** tokenConfig.priceExpo).toFixed(4);
     const betVolume = (parseInt(round[6]) / 10 ** monExpo).toFixed(4);
@@ -163,10 +169,10 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
           winnerPosition === "pump" && parseFloat(userPumpAmount) > 0
             ? (userPumpAmount * 1.9).toFixed(4)
             : winnerPosition === "dump" && parseFloat(userDumpAmount) > 0
-              ? (parseFloat(userDumpAmount) * 1.9).toFixed(4)
-              : winnerPosition === "none"
-                ? parseFloat(userPumpAmount) + parseFloat(userDumpAmount)
-                : "0.0000";
+            ? (parseFloat(userDumpAmount) * 1.9).toFixed(4)
+            : winnerPosition === "none"
+            ? parseFloat(userPumpAmount) + parseFloat(userDumpAmount)
+            : "0.0000";
 
         return [roundId, userAddress, userPumpAmount, userDumpAmount, userPayout];
       });
@@ -220,14 +226,6 @@ INSERT INTO prediction_players (
         });
 
         console.log(`[${tokenConfig.name}] Inserted values into the players table.`);
-        for (const userData of insertUserData) {
-          const userAddress = userData[1];
-          const userPumpAmount = parseFloat(userData[2]);
-          const userDumpAmount = parseFloat(userData[3]);
-          const userPayout = parseFloat(userData[4]);
-
-          await updateGameStats(userAddress, 'prediction', userPumpAmount + userDumpAmount, userPayout);
-        }
       }
     } catch (err) {
       console.error(`[${tokenConfig.name}] Error:`, err);
@@ -237,85 +235,6 @@ INSERT INTO prediction_players (
   } catch (error) {
     console.error(`[${tokenConfig.name}] Error processing round ${roundId}: ${error}`);
     return false;
-  }
-}
-
-async function ensureUserProfile(walletAddress) {
-  try {
-    const normalizedAddress = walletAddress.toLowerCase();
-
-    const existingProfile = await pool.query(
-      'SELECT id FROM user_profiles WHERE wallet_address = $1',
-      [normalizedAddress]
-    );
-
-    if (existingProfile.rows.length > 0) {
-      return existingProfile.rows[0].id;
-    }
-
-    const newProfile = await pool.query(
-      'INSERT INTO user_profiles (wallet_address, created_at, updated_at) VALUES ($1, NOW(), NOW()) RETURNING id',
-      [normalizedAddress]
-    );
-
-    return newProfile.rows[0].id;
-  } catch (error) {
-    console.error("Error ensuring user profile:", error);
-    throw error;
-  }
-}
-
-async function updateGameStats(walletAddress, gameType, betAmount, winnings = 0) {
-  try {
-    const profileId = await ensureUserProfile(walletAddress);
-
-    try {
-      await pool.query(
-        `
-        INSERT INTO user_game_stats (
-          profile_id,
-          game_type,
-          total_bet_volume,
-          total_winnings,
-          games_played,
-          last_played
-        ) VALUES ($1, $2, $3, $4, 1, NOW())
-        ON CONFLICT ON CONSTRAINT user_game_stats_profile_game_unique
-        DO UPDATE SET
-          total_bet_volume = user_game_stats.total_bet_volume + $3,
-          total_winnings = user_game_stats.total_winnings + $4,
-          games_played = user_game_stats.games_played + 1,
-          last_played = NOW(),
-          updated_at = NOW()
-      `,
-        [profileId, gameType, betAmount, winnings],
-      );
-    } catch (_constraintError) {
-      await pool.query(
-        `
-        INSERT INTO user_game_stats (
-          profile_id,
-          game_type,
-          total_bet_volume,
-          total_winnings,
-          games_played,
-          last_played
-        ) VALUES ($1, $2, $3, $4, 1, NOW())
-        ON CONFLICT (profile_id, game_type)
-        DO UPDATE SET
-          total_bet_volume = user_game_stats.total_bet_volume + $3,
-          total_winnings = user_game_stats.total_winnings + $4,
-          games_played = user_game_stats.games_played + 1,
-          last_played = NOW(),
-          updated_at = NOW()
-      `,
-        [profileId, gameType, betAmount, winnings],
-      );
-    }
-
-    console.log(`Updated game stats for ${walletAddress}: bet=${betAmount}, winnings=${winnings}`);
-  } catch (error) {
-    console.error("Error updating game stats:", error);
   }
 }
 
@@ -401,10 +320,18 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
         // Get current nonce for this specific wallet
         const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
 
-        const tx = await gameContract.cancelRound(roundId, updateData, {
-          value: updateFee,
-          nonce: nonce,
-        });
+        let tx;
+        if (tokenConfig.name === "ETH") {
+          tx = await gameContract.cancelRound(updateData, {
+            value: updateFee,
+            nonce: nonce,
+          });
+        }else{
+          tx = await gameContract.cancelRound(roundId, updateData, {
+            value: updateFee,
+            nonce: nonce,
+          });
+        }
 
         receipt = await tx.wait();
         console.log(`[${tokenConfig.name}] Successfully cancelled round ${roundId}! TX: ${receipt.hash}`);
@@ -479,60 +406,81 @@ async function executeNormalRound(tokenConfig) {
     }
   }
 
+  async function sendTxWithTimeout(contractFn, args, opts, timeoutMs = 5000) {
+    const tx = await contractFn(...args, opts);
+    return Promise.race([tx.wait(), new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), timeoutMs))]);
+  }
+
   console.log(`[${tokenConfig.name}] Executing round with updated price data...`);
+
+  let nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
+
   try {
-    let nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
+    let receipt;
 
     try {
-      const tx = await gameContract.executeRound(updateData, {
-        value: updateFee,
-        nonce,
-      });
-      const receipt = await tx.wait();
+      // первая попытка
+      receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], { value: updateFee, nonce }, 5000);
+
       console.log(`[${tokenConfig.name}] Successfully executed round! TX: ${receipt.hash}`);
     } catch (err) {
-      if (err.message.includes("Can only lock round within extended buffer")) {
+      if (err.message.includes("Transaction timeout")) {
+        console.warn(`[${tokenConfig.name}] TX timeout, retrying with new nonce...`);
+        nonce++;
+
+        try {
+          // вторая попытка
+          receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], { value: updateFee, nonce }, 5000);
+
+          console.log(`[${tokenConfig.name}] Successfully executed round on retry! TX: ${receipt.hash}`);
+        } catch (retryErr) {
+          console.error(`[${tokenConfig.name}] Retry failed, cancelling round...`, retryErr);
+          await cancelRound(tokenConfig, currentRoundId - 1, updateData, updateFee);
+          return { success: false, roundExecuted: false, roundCancelled: true };
+        }
+      } else if (err.message.includes("Can only lock round within extended buffer")) {
         await cancelRound(tokenConfig, currentRoundId - 1, updateData, updateFee);
+        return { success: true, roundExecuted: false, roundCancelled: true };
       } else if (err.message.includes("higher priority")) {
         nonce++;
-        console.log(`[${tokenConfig.name}] Retrying transaction with new nonce`);
-        const tx = await gameContract.executeRound(updateData, {
-          value: updateFee,
-          nonce,
-        });
-        const receipt = await tx.wait();
+        console.log(`[${tokenConfig.name}] Retrying transaction with new nonce...`);
+        receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], { value: updateFee, nonce }, 5000);
         console.log(`[${tokenConfig.name}] Successfully executed round! TX: ${receipt.hash}`);
-      }
-    }
-
-    const loggedRoundId = currentRoundId - 1;
-    const updatedPreviousRound = await gameContract.rounds(loggedRoundId);
-    console.log(`[${tokenConfig.name}] Previous round (${loggedRoundId}) close price: ${updatedPreviousRound.closePrice.toString()}`);
-
-    let recordResult;
-    for (let attempt = 1; attempt < 4; attempt++) {
-      recordResult = await processRoundStatsAndPush(tokenConfig, loggedRoundId);
-      if (recordResult) {
-        break;
       } else {
-        await sleep(1);
-        continue;
+        throw err;
       }
     }
 
-    if (recordResult) {
-      console.log(`[${tokenConfig.name}] Successfully recorded round ${loggedRoundId}!`);
-    } else {
-      console.warn(`[${tokenConfig.name}] Round ${loggedRoundId} has not been recorded.`);
+    if (receipt) {
+      const loggedRoundId = currentRoundId - 1;
+      const updatedPreviousRound = await gameContract.rounds(loggedRoundId);
+      console.log(`[${tokenConfig.name}] Previous round (${loggedRoundId}) close price: ${updatedPreviousRound.closePrice.toString()}`);
+
+      let recordResult;
+      for (let attempt = 1; attempt < 4; attempt++) {
+        recordResult = await processRoundStatsAndPush(tokenConfig, loggedRoundId);
+        if (recordResult) {
+          break;
+        } else {
+          await sleep(1);
+          continue;
+        }
+      }
+
+      if (recordResult) {
+        console.log(`[${tokenConfig.name}] Successfully recorded round ${loggedRoundId}!`);
+      } else {
+        console.warn(`[${tokenConfig.name}] Round ${loggedRoundId} has not been recorded.`);
+      }
+
+      const updatedCurrentRound = await gameContract.rounds(currentRoundId);
+      console.log(`[${tokenConfig.name}] Current round (${currentRoundId}) lock price: ${updatedCurrentRound.lockPrice.toString()}`);
+
+      const currentPrice = await gameContract.currentPrice();
+      console.log(`[${tokenConfig.name}] Contract current price: ${currentPrice.toString()}`);
+
+      return { success: true, roundExecuted: true };
     }
-
-    const updatedCurrentRound = await gameContract.rounds(currentRoundId);
-    console.log(`[${tokenConfig.name}] Current round (${currentRoundId}) lock price: ${updatedCurrentRound.lockPrice.toString()}`);
-
-    const currentPrice = await gameContract.currentPrice();
-    console.log(`[${tokenConfig.name}] Contract current price: ${currentPrice.toString()}`);
-
-    return { success: true, roundExecuated: true };
   } catch (execError) {
     console.log(execError.message.includes("Can only lock round within extended buffer"));
 
@@ -595,7 +543,8 @@ export async function playAllTokens() {
     if (result.status === "fulfilled") {
       const { success, roundExecuted, roundCancelled, action, error } = result.value;
       console.log(
-        `[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${action || "normal"
+        `[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${
+          action || "normal"
         }`
       );
 
