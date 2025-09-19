@@ -1,11 +1,12 @@
-import {getPythUpdateData} from "./utils/hermesApi.js";
-import {sleep} from "./utils/sleep.js";
-import {ethers} from "ethers";
+import { getPythUpdateData } from "./utils/hermesApi.js";
+import { sleep } from "./utils/sleep.js";
+import { ethers } from "ethers";
 import express from "express";
-import {Pool} from "pg";
+import { Pool } from "pg";
 import dotenv from "dotenv";
-import {readJson} from "./utils/readFile.js";
+import { readJson } from "./utils/readFile.js";
 import MulticallProvider from "ethers-multicall-provider";
+const referralService = require("./referralService.js");
 
 dotenv.config();
 
@@ -67,13 +68,13 @@ const pythContracts = {};
 TOKENS.forEach((token) => {
 	// Create separate wallet for each token
 	operatorWallets[token.name] = new ethers.Wallet(token.operatorPrivateKey, provider);
-	
+
 	// Create game contracts with token-specific wallet
 	gameContracts[token.name] = new ethers.Contract(token.contractAddress, token.abi, operatorWallets[token.name]);
-	
+
 	// Create wrapped contracts for multicall
 	wrappedGameContracts[token.name] = new ethers.Contract(token.contractAddress, token.abi, multicallProvider);
-	
+
 	// Create pyth contracts with token-specific wallet
 	pythContracts[token.name] = new ethers.Contract(pythOracleAddress, pythAbi, operatorWallets[token.name]);
 });
@@ -85,7 +86,7 @@ app.use(express.json());
 
 const pool = new Pool({
 	connectionString: process.env.DATABASE_URL,
-	ssl: {rejectUnauthorized: false},
+	ssl: { rejectUnauthorized: false },
 	connectionTimeoutMillis: 1500,
 	max: 10,
 	idleTimeoutMillis: 3000,
@@ -115,12 +116,12 @@ const withDbClient = async (operation) => {
 
 async function processRoundStatsAndPush(tokenConfig, roundId) {
 	console.log(`[${tokenConfig.name}] Parsing data for round no.`, roundId);
-	
+
 	try {
 		let insertUserData;
 		const gameContract = gameContracts[tokenConfig.name];
 		const wrappedGameContract = wrappedGameContracts[tokenConfig.name];
-		
+
 		const round = await gameContract.rounds(roundId);
 		const startTimestamp = new Date(parseInt(round[1]) * 1000);
 		const lockPrice = (parseInt(round[4]) / 10 ** tokenConfig.priceExpo).toFixed(4);
@@ -133,20 +134,20 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 		const rewardsCalculated = round[11];
 		const roundCancelled = round[12];
 		const winnerPosition = betPositionNames[parseInt(round[13])];
-		
+
 		console.log(`[${tokenConfig.name}] Start timestamp:`, startTimestamp);
 		console.log(`[${tokenConfig.name}] Lock price:`, lockPrice);
 		console.log(`[${tokenConfig.name}] Close price:`, closePrice);
 		console.log(`[${tokenConfig.name}] Bet volume:`, betVolume);
 		console.log(`[${tokenConfig.name}] Winner position:`, winnerPosition);
-		
+
 		const usersInRound = await gameContract.getUsersInRound(roundId);
 		const userCount = usersInRound.length;
 		console.log(`[${tokenConfig.name}] Users in round ${roundId}: ${userCount}`);
-		
+
 		if (userCount > 0) {
 			const betCalls = usersInRound.map((user) => wrappedGameContract.userBetsInRound(roundId, user));
-			
+
 			const betResults = await Promise.all(
 				betCalls.map((call) =>
 					call.catch((error) => {
@@ -154,17 +155,17 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 					})
 				)
 			);
-			
+
 			const userBets = usersInRound.map((user, index) => ({
 				user,
 				bet: betResults[index] ? betResults[index] : "None",
 			}));
-			
+
 			insertUserData = userBets.map((userData) => {
 				const userAddress = userData.user.toLowerCase();
 				const userPumpAmount = (parseInt(userData.bet[0]) / 10 ** monExpo).toFixed(4);
 				const userDumpAmount = (parseInt(userData.bet[1]) / 10 ** monExpo).toFixed(4);
-				
+
 				const userPayout =
 					winnerPosition === "pump" && parseFloat(userPumpAmount) > 0
 						? (userPumpAmount * 1.9).toFixed(4)
@@ -173,14 +174,34 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 							: winnerPosition === "none"
 								? parseFloat(userPumpAmount) + parseFloat(userDumpAmount)
 								: "0.0000";
-				
+
 				return [roundId, userAddress, userPumpAmount, userDumpAmount, userPayout];
 			});
+
+			try {
+				for (const userData of userBets) {
+					const userAddress = userData.user.toLowerCase();
+					const userPumpAmount = parseFloat((parseInt(userData.bet[0]) / 10 ** monExpo).toFixed(4));
+					const userDumpAmount = parseFloat((parseInt(userData.bet[1]) / 10 ** monExpo).toFixed(4));
+					const totalBetAmount = userPumpAmount + userDumpAmount;
+
+					if (totalBetAmount > 0) {
+						await referralService.processReferralEarning(
+							userAddress,
+							"prediction",
+							totalBetAmount
+						);
+					}
+				}
+				console.log(`[${tokenConfig.name}] Referral earnings processed for ${userBets.length} players`);
+			} catch (referralError) {
+				console.error(`[${tokenConfig.name}] Error processing referral earning:`, referralError);
+			}
 		}
-		
+
 		try {
 			let insertedGameId;
-			
+
 			await withDbClient(async (client) => {
 				const query = `
             INSERT INTO prediction_games (game_type, round_id, pair, start_timestamp, lock_price, close_price,
@@ -188,7 +209,7 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
                                           rewards_calculated, round_cancelled, winner_position)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id
 				`;
-				
+
 				const result = await client.query(query, [
 					tokenConfig.gameType,
 					roundId,
@@ -205,12 +226,12 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 					roundCancelled,
 					winnerPosition,
 				]);
-				
+
 				insertedGameId = result.rows[0].id;
 			});
-			
+
 			console.log(`[${tokenConfig.name}] Round ${roundId} successfully recorded!`);
-			
+
 			if (insertUserData && insertedGameId) {
 				await withDbClient(async (client) => {
 					const queryText = `
@@ -218,16 +239,16 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
               VALUES ${insertUserData.map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(", ")}
 					`;
 					const queryValues = insertUserData.map((row) => [insertedGameId, row[1], row[2], row[3], row[4]]).flat();
-					
+
 					await client.query(queryText, queryValues);
 				});
-				
+
 				console.log(`[${tokenConfig.name}] Inserted values into the players table.`);
 			}
 		} catch (err) {
 			console.error(`[${tokenConfig.name}] Error:`, err);
 		}
-		
+
 		return true;
 	} catch (error) {
 		console.error(`[${tokenConfig.name}] Error processing round ${roundId}: ${error}`);
@@ -240,15 +261,15 @@ async function waitForTimestamp(provider, targetTimestamp, tokenConfig) {
 		const currentBlock = await provider.getBlock("latest");
 		const currentTimestamp = BigInt(currentBlock.timestamp);
 		const target = BigInt(targetTimestamp);
-		
+
 		if (currentTimestamp >= target) {
 			console.log(`[${tokenConfig.name}] Target timestamp reached. Current: ${currentTimestamp}, Target: ${target}`);
 			break;
 		}
-		
+
 		const timeToWaitBigInt = target - currentTimestamp;
 		const timeToWait = Number(timeToWaitBigInt > 5n ? 5n : timeToWaitBigInt);
-		
+
 		console.log(`[${tokenConfig.name}] Current ${currentTimestamp} => waiting ${timeToWait} seconds until ${target}`);
 		await sleep(timeToWait);
 	}
@@ -259,64 +280,64 @@ async function handleGenesis(tokenConfig) {
 	const operatorWallet = operatorWallets[tokenConfig.name];
 	const genesisStarted = await gameContract.genesisStarted();
 	const genesisLocked = await gameContract.genesisLocked();
-	
+
 	if (!genesisStarted) {
 		console.log(`[${tokenConfig.name}] Genesis not started yet, calling genesisStartRound...`);
 		const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
-		
+
 		const tx = await gameContract.genesisStartRound({
 			nonce: nonce,
 		});
-		
+
 		await tx.wait();
 		console.log(`[${tokenConfig.name}] GenesisStartRound - Completed!`);
-		return {type: "genesis_started"};
+		return { type: "genesis_started" };
 	}
-	
+
 	if (!genesisLocked) {
 		console.log(`[${tokenConfig.name}] Genesis not locked yet, waiting for lock timestamp...`);
 		const currentRoundId = await gameContract.currentRoundId();
 		const round = await gameContract.rounds(currentRoundId);
-		
+
 		await waitForTimestamp(provider, round.lockTimestamp, tokenConfig);
-		
+
 		console.log(`[${tokenConfig.name}] Getting Pyth update data...`);
 		const hermesResponse = await getPythUpdateData(tokenConfig.priceFeedId);
 		const updateData = ["0x".concat(hermesResponse)];
-		
+
 		console.log(`[${tokenConfig.name}] Calling genesisLockRound...`);
 		const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
-		
+
 		const tx = await gameContract.genesisLockRound(updateData, {
 			value: 1,
 			nonce: nonce,
 		});
 		await tx.wait();
 		console.log(`[${tokenConfig.name}] GenesisLockRound - Complete!`);
-		return {type: "genesis_locked"};
+		return { type: "genesis_locked" };
 	}
-	
-	return {type: "ready_for_normal"};
+
+	return { type: "ready_for_normal" };
 }
 
 async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 	const gameContract = gameContracts[tokenConfig.name];
 	const operatorWallet = operatorWallets[tokenConfig.name];
-	
+
 	try {
 		console.log(`[${tokenConfig.name}] Cancelling round ${roundId}...`);
-		
+
 		let attempt = 0;
 		let receipt;
 		const maxAttempts = 5;
-		
+
 		while (attempt < maxAttempts) {
 			attempt++;
-			
+
 			try {
 				// Get current nonce for this specific wallet
 				const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
-				
+
 				let tx;
 				if (tokenConfig.name === "ETH" || tokenConfig.name === "SOL") {
 					tx = await gameContract.cancelRound(updateData, {
@@ -329,7 +350,7 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 						nonce: nonce,
 					});
 				}
-				
+
 				receipt = await tx.wait();
 				console.log(`[${tokenConfig.name}] Successfully cancelled round ${roundId}! TX: ${receipt.hash}`);
 				break;
@@ -343,7 +364,7 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 				}
 			}
 		}
-		
+
 		if (!receipt) {
 			throw new Error("Failed to send cancelRound transaction after multiple attempts.");
 		}
@@ -357,18 +378,18 @@ async function executeNormalRound(tokenConfig) {
 	const gameContract = gameContracts[tokenConfig.name];
 	const operatorWallet = operatorWallets[tokenConfig.name];
 	const pythContract = pythContracts[tokenConfig.name];
-	
+
 	console.log(`[${tokenConfig.name}] Executing normal round...`);
 	const currentRoundId = parseInt(await gameContract.currentRoundId());
 	const currentRound = await gameContract.rounds(currentRoundId);
-	
+
 	const currentBlock = await provider.getBlock("latest");
 	const currentTimestamp = BigInt(currentBlock.timestamp);
-	
+
 	if (currentTimestamp < BigInt(currentRound.lockTimestamp)) {
 		await waitForTimestamp(provider, currentRound.lockTimestamp, tokenConfig);
 	}
-	
+
 	let hermesData;
 	for (let attempt = 1; attempt <= 3; attempt++) {
 		try {
@@ -384,13 +405,13 @@ async function executeNormalRound(tokenConfig) {
 			await sleep(2);
 		}
 	}
-	
+
 	if (!hermesData) {
 		throw new Error(`[${tokenConfig.name}] Failed to get Hermes data after 3 attempts`);
 	}
-	
+
 	const updateData = ["0x".concat(hermesData)];
-	
+
 	let updateFee;
 	for (let attempt = 1; attempt <= 3; attempt++) {
 		try {
@@ -402,48 +423,48 @@ async function executeNormalRound(tokenConfig) {
 			await sleep(2);
 		}
 	}
-	
+
 	async function sendTxWithTimeout(contractFn, args, opts, timeoutMs = 5000) {
 		const tx = await contractFn(...args, opts);
 		return Promise.race([tx.wait(), new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), timeoutMs))]);
 	}
-	
+
 	console.log(`[${tokenConfig.name}] Executing round with updated price data...`);
-	
+
 	let nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
-	
+
 	try {
 		let receipt;
-		
+
 		try {
 			// первая попытка
 			receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], {
 				value: updateFee,
 				nonce
 			}, 5000);
-			
+
 			console.log(`[${tokenConfig.name}] Successfully executed round! TX: ${receipt.hash}`);
 		} catch (err) {
 			if (err.message.includes("Transaction timeout")) {
 				console.warn(`[${tokenConfig.name}] TX timeout, retrying with new nonce...`);
 				nonce++;
-				
+
 				try {
 					// вторая попытка
 					receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], {
 						value: updateFee,
 						nonce
 					}, 5000);
-					
+
 					console.log(`[${tokenConfig.name}] Successfully executed round on retry! TX: ${receipt.hash}`);
 				} catch (retryErr) {
 					console.error(`[${tokenConfig.name}] Retry failed, cancelling round...`, retryErr);
 					await cancelRound(tokenConfig, currentRoundId - 1, updateData, updateFee);
-					return {success: false, roundExecuted: false, roundCancelled: true};
+					return { success: false, roundExecuted: false, roundCancelled: true };
 				}
 			} else if (err.message.includes("Can only lock round within extended buffer")) {
 				await cancelRound(tokenConfig, currentRoundId - 1, updateData, updateFee);
-				return {success: true, roundExecuted: false, roundCancelled: true};
+				return { success: true, roundExecuted: false, roundCancelled: true };
 			} else if (err.message.includes("higher priority")) {
 				nonce++;
 				console.log(`[${tokenConfig.name}] Retrying transaction with new nonce...`);
@@ -456,12 +477,12 @@ async function executeNormalRound(tokenConfig) {
 				throw err;
 			}
 		}
-		
+
 		if (receipt) {
 			const loggedRoundId = currentRoundId - 1;
 			const updatedPreviousRound = await gameContract.rounds(loggedRoundId);
 			console.log(`[${tokenConfig.name}] Previous round (${loggedRoundId}) close price: ${updatedPreviousRound.closePrice.toString()}`);
-			
+
 			let recordResult;
 			for (let attempt = 1; attempt < 4; attempt++) {
 				recordResult = await processRoundStatsAndPush(tokenConfig, loggedRoundId);
@@ -472,31 +493,31 @@ async function executeNormalRound(tokenConfig) {
 					continue;
 				}
 			}
-			
+
 			if (recordResult) {
 				console.log(`[${tokenConfig.name}] Successfully recorded round ${loggedRoundId}!`);
 			} else {
 				console.warn(`[${tokenConfig.name}] Round ${loggedRoundId} has not been recorded.`);
 			}
-			
+
 			const updatedCurrentRound = await gameContract.rounds(currentRoundId);
 			console.log(`[${tokenConfig.name}] Current round (${currentRoundId}) lock price: ${updatedCurrentRound.lockPrice.toString()}`);
-			
+
 			const currentPrice = await gameContract.currentPrice();
 			console.log(`[${tokenConfig.name}] Contract current price: ${currentPrice.toString()}`);
-			
-			return {success: true, roundExecuted: true};
+
+			return { success: true, roundExecuted: true };
 		}
 	} catch (execError) {
 		console.log(execError.message.includes("Can only lock round within extended buffer"));
-		
+
 		if (execError.message && execError.message.includes("Can only lock round within extended buffer")) {
 			console.log(`[${tokenConfig.name}] Extended buffer error detected, attempting to cancel round...`);
-			
+
 			try {
 				const roundToCancel = currentRoundId - 1;
 				await cancelRound(tokenConfig, roundToCancel, updateData, updateFee);
-				return {success: true, roundExecuted: false, roundCancelled: true};
+				return { success: true, roundExecuted: false, roundCancelled: true };
 			} catch (cancelError) {
 				console.error(`[${tokenConfig.name}] Failed to cancel round:`, cancelError);
 				return {
@@ -506,12 +527,12 @@ async function executeNormalRound(tokenConfig) {
 				};
 			}
 		}
-		
+
 		if (execError.message && execError.message.includes("timestamp")) {
 			console.log(`[${tokenConfig.name}] Timing issue detected, will retry in next iteration`);
-			return {success: false, roundExecuted: false, retry: true};
+			return { success: false, roundExecuted: false, retry: true };
 		}
-		
+
 		throw execError;
 	}
 }
@@ -519,7 +540,7 @@ async function executeNormalRound(tokenConfig) {
 async function playToken(tokenConfig) {
 	try {
 		const genesisStatus = await handleGenesis(tokenConfig);
-		
+
 		if (genesisStatus.type !== "ready_for_normal") {
 			return {
 				success: true,
@@ -527,36 +548,35 @@ async function playToken(tokenConfig) {
 				action: genesisStatus.type,
 			};
 		}
-		
+
 		return await executeNormalRound(tokenConfig);
 	} catch (error) {
 		console.error(`[${tokenConfig.name}] Unexpected error in playToken:`, error);
-		return {success: false, roundExecuted: false, error: error.message};
+		return { success: false, roundExecuted: false, error: error.message };
 	}
 }
 
 export async function playAllTokens() {
 	console.log("=== Starting parallel execution for all tokens ===");
-	
+
 	const results = await Promise.allSettled(TOKENS.map((tokenConfig) => playToken(tokenConfig)));
-	
+
 	let overallSuccess = false;
 	let anyRoundExecuted = false;
-	
+
 	results.forEach((result, index) => {
 		const tokenName = TOKENS[index].name;
-		
+
 		if (result.status === "fulfilled") {
-			const {success, roundExecuted, roundCancelled, action, error} = result.value;
+			const { success, roundExecuted, roundCancelled, action, error } = result.value;
 			console.log(
-				`[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${
-					action || "normal"
+				`[${tokenName}] Result: success=${success}, roundExecuted=${roundExecuted}, roundCancelled=${roundCancelled || false}, action=${action || "normal"
 				}`
 			);
-			
+
 			if (success) overallSuccess = true;
 			if (roundExecuted) anyRoundExecuted = true;
-			
+
 			if (error) {
 				console.error(`[${tokenName}] Error: ${error}`);
 			}
@@ -564,19 +584,19 @@ export async function playAllTokens() {
 			console.error(`[${tokenName}] Promise rejected:`, result.reason);
 		}
 	});
-	
+
 	console.log(`=== Parallel execution completed. Overall success: ${overallSuccess}, Any round executed: ${anyRoundExecuted} ===`);
-	
-	return {success: overallSuccess, anyRoundExecuted};
+
+	return { success: overallSuccess, anyRoundExecuted };
 }
 
 async function loop() {
 	let consecutiveErrors = 0;
-	
+
 	while (true) {
 		try {
 			const result = await playAllTokens();
-			
+
 			if (result.success) {
 				consecutiveErrors = 0;
 				if (result.anyRoundExecuted) {
@@ -593,12 +613,12 @@ async function loop() {
 		} catch (error) {
 			consecutiveErrors++;
 			console.error(`Error in main loop (attempt ${consecutiveErrors}):`, error);
-			
+
 			if (consecutiveErrors >= 20) {
 				console.error("Too many consecutive errors, exiting...");
 				process.exit(1);
 			}
-			
+
 			await sleep(5);
 		}
 	}
@@ -620,7 +640,7 @@ async function setupPredictionDatabase() {
         ) NOT NULL UNIQUE
             )
 		`);
-		
+
 		await pool.query(`
         CREATE TABLE IF NOT EXISTS prediction_games
         (
@@ -694,7 +714,7 @@ async function setupPredictionDatabase() {
         )
             )
 		`);
-		
+
 		await pool.query(`
         CREATE TABLE IF NOT EXISTS prediction_players
         (
@@ -735,7 +755,7 @@ async function setupPredictionDatabase() {
         )
             )
 		`);
-		
+
 		console.log("Database tables setup completed for all tokens");
 	} catch (error) {
 		console.log("Failed to setup Prediction Game tables:", error);
@@ -755,7 +775,7 @@ function displayWalletAddresses() {
 
 app.listen(port, async () => {
 	console.log("Multi-token Controller running on port", port);
-	
+
 	// Validate that all required environment variables are present
 	const missingVars = [];
 	TOKENS.forEach((token) => {
@@ -763,15 +783,16 @@ app.listen(port, async () => {
 		if (!token.priceFeedId) missingVars.push(`${token.name}_PRICE_FEED_ID`);
 		if (!token.operatorPrivateKey) missingVars.push(`${token.name}_OPERATOR_PRIVATE_KEY`);
 	});
-	
+
 	if (missingVars.length > 0) {
 		console.error("Missing required environment variables:", missingVars);
 		process.exit(1);
 	}
-	
+
 	// Display wallet addresses for verification
 	displayWalletAddresses();
-	
+
 	await setupPredictionDatabase();
+	await referralService.initializeReferralService(pool);
 	loop();
 });
