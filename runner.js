@@ -313,7 +313,6 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 			attempt++;
 			
 			try {
-				// Get current nonce for this specific wallet
 				const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
 				
 				let tx;
