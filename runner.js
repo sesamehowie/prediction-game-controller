@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import { readJson } from "./utils/readFile.js";
 import MulticallProvider from "ethers-multicall-provider";
-const referralService = require("./referralService.js");
+import referralService from "./referralService.js";
 
 dotenv.config();
 
