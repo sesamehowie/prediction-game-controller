@@ -114,6 +114,100 @@ const withDbClient = async (operation) => {
 	}
 };
 
+async function updateGameStats(walletAddress, gameType, betAmount, winnings = 0) {
+	try {
+		const normalizedAddress = walletAddress.toLowerCase();
+
+		let profileId;
+		await withDbClient(async (client) => {
+			const profileResult = await client.query(
+				`INSERT INTO user_profiles (wallet_address) 
+				 VALUES ($1) 
+				 ON CONFLICT (wallet_address) DO UPDATE SET updated_at = NOW() 
+				 RETURNING id`,
+				[normalizedAddress]
+			);
+			profileId = profileResult.rows[0].id;
+		});
+
+		const isWinningGame = parseFloat(winnings) > parseFloat(betAmount);
+
+		await withDbClient(async (client) => {
+			try {
+				await client.query(
+					`INSERT INTO user_game_stats (
+						profile_id,
+						game_type,
+						total_bet_volume,
+						total_winnings,
+						games_played,
+						last_played
+					) VALUES ($1, $2, $3, $4, 1, NOW())
+					ON CONFLICT ON CONSTRAINT user_game_stats_profile_game_unique
+					DO UPDATE SET
+						total_bet_volume = user_game_stats.total_bet_volume + $3,
+						total_winnings = user_game_stats.total_winnings + $4,
+						games_played = user_game_stats.games_played + 1,
+						last_played = NOW(),
+						updated_at = NOW()`,
+					[profileId, gameType, betAmount, winnings]
+				);
+
+				await client.query(
+					`UPDATE user_profiles SET
+						total_games_count = total_games_count + 1,
+						winning_games_count = winning_games_count + $2,
+						maximum_win_amount = GREATEST(maximum_win_amount, $3),
+						win_rate = CASE 
+							WHEN total_games_count + 1 > 0 
+							THEN ROUND((winning_games_count + $2)::DECIMAL / (total_games_count + 1) * 100)
+							ELSE 0 
+						END,
+						updated_at = NOW()
+					WHERE id = $1`,
+					[profileId, isWinningGame ? 1 : 0, winnings]
+				);
+			} catch (constraintError) {
+				await client.query(
+					`INSERT INTO user_game_stats (
+						profile_id,
+						game_type,
+						total_bet_volume,
+						total_winnings,
+						games_played,
+						last_played
+					) VALUES ($1, $2, $3, $4, 1, NOW())
+					ON CONFLICT (profile_id, game_type)
+					DO UPDATE SET
+						total_bet_volume = user_game_stats.total_bet_volume + $3,
+						total_winnings = user_game_stats.total_winnings + $4,
+						games_played = user_game_stats.games_played + 1,
+						last_played = NOW(),
+						updated_at = NOW()`,
+					[profileId, gameType, betAmount, winnings]
+				);
+
+				await client.query(
+					`UPDATE user_profiles SET
+						total_games_count = total_games_count + 1,
+						winning_games_count = winning_games_count + $2,
+						maximum_win_amount = GREATEST(maximum_win_amount, $3),
+						win_rate = CASE 
+							WHEN total_games_count + 1 > 0 
+							THEN ROUND((winning_games_count + $2)::DECIMAL / (total_games_count + 1) * 100)
+							ELSE 0 
+						END,
+						updated_at = NOW()
+					WHERE id = $1`,
+					[profileId, isWinningGame ? 1 : 0, winnings]
+				);
+			}
+		});
+	} catch (error) {
+		console.error(`Error updating game stats for ${walletAddress}: ${error.message}`);
+	}
+}
+
 async function processRoundStatsAndPush(tokenConfig, roundId) {
 	console.log(`[${tokenConfig.name}] Parsing data for round no.`, roundId);
 
@@ -185,7 +279,22 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 					const userDumpAmount = parseFloat((parseInt(userData.bet[1]) / 10 ** monExpo).toFixed(4));
 					const totalBetAmount = userPumpAmount + userDumpAmount;
 
+					const userPayout = winnerPosition === "pump" && userPumpAmount > 0
+						? parseFloat((userPumpAmount * 1.9).toFixed(4))
+						: winnerPosition === "dump" && userDumpAmount > 0
+							? parseFloat((userDumpAmount * 1.9).toFixed(4))
+							: winnerPosition === "none"
+								? userPumpAmount + userDumpAmount
+								: 0;
+
 					if (totalBetAmount > 0) {
+						await updateGameStats(
+							userAddress,
+							"prediction",
+							totalBetAmount,
+							userPayout
+						);
+
 						await referralService.processReferralEarning(
 							userAddress,
 							"prediction",
@@ -193,9 +302,9 @@ async function processRoundStatsAndPush(tokenConfig, roundId) {
 						);
 					}
 				}
-				console.log(`[${tokenConfig.name}] Referral earnings processed for ${userBets.length} players`);
-			} catch (referralError) {
-				console.error(`[${tokenConfig.name}] Error processing referral earning:`, referralError);
+				console.log(`[${tokenConfig.name}] Game stats and referral earnings processed for ${userBets.length} players`);
+			} catch (updateError) {
+				console.error(`[${tokenConfig.name}] Error processing game stats/referral earning:`, updateError);
 			}
 		}
 
