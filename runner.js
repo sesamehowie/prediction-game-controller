@@ -59,7 +59,6 @@ const monExpo = 18;
 const provider = new ethers.JsonRpcProvider(monadRpc);
 const multicallProvider = MulticallProvider.MulticallWrapper.wrap(provider);
 
-// Create wallets, contracts, and pyth contracts for each token
 const operatorWallets = {};
 const gameContracts = {};
 const wrappedGameContracts = {};
@@ -444,7 +443,6 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 			attempt++;
 
 			try {
-				// Get current nonce for this specific wallet
 				const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
 
 				let tx;
