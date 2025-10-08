@@ -1,5 +1,5 @@
-const crypto = require("crypto");
-const { ethers } = require("ethers");
+import crypto from "crypto";
+import { ethers } from "ethers";
 
 let dbPool;
 
@@ -129,7 +129,7 @@ async function processReferralEarning(refereeAddress, gameType, betAmount) {
     }
 }
 
-module.exports = {
+export default {
     initializeReferralService,
     processReferralEarning,
     checkReferrerAccess,
