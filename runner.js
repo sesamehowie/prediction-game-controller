@@ -208,7 +208,7 @@ async function updateGameStats(walletAddress, gameType, betAmount, winnings = 0)
 }
 
 async function processRoundStatsAndPush(tokenConfig, roundId) {
-	console.log(`[${tokenConfig.name}] Parsing data for round no.`, roundId);
+	console.log(`[${tokenConfig.name}] Parsing data for round no`, roundId);
 
 	try {
 		let insertUserData;
