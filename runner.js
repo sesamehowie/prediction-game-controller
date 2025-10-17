@@ -93,7 +93,7 @@ const pool = new Pool({
 });
 
 pool.on("connect", (client) => {
-	client.query("SET client_encoding TO UTF8").catch((err) => console.error("Failed to set encoding:", err.message));
+	client.query("SET client_encoding TO UTF8 ").catch((err) => console.error("Failed to set encoding:", err.message));
 });
 
 pool.on("error", (err, client) => {
