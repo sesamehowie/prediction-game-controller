@@ -97,7 +97,7 @@ pool.on("connect", (client) => {
 });
 
 pool.on("error", (err, client) => {
-	console.error("Unexpected error on idle client:", err);
+	console.error("Unexpected error on idle client: ", err);
 });
 
 const withDbClient = async (operation) => {
