@@ -18,7 +18,6 @@ const pythOracleAddress = process.env.PYTH_ORACLE_ADDRESS;
 const predictionGameAbi = readJson(abiPath);
 const pythAbi = ["function getUpdateFee(bytes[] calldata updateData) external view returns (uint256 feeAmount)"];
 
-// Configuration for 3 tokens with separate private keys
 const TOKENS = [
 	{
 		name: "BTC",
