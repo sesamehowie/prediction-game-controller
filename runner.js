@@ -441,19 +441,12 @@ async function cancelRound(tokenConfig, roundId, updateData, updateFee) {
 
 			try {
 				const nonce = await provider.getTransactionCount(operatorWallet.address, "pending");
-
-				let tx;
-				if (tokenConfig.name === "ETH" || tokenConfig.name === "SOL") {
-					tx = await gameContract.cancelRound(updateData, {
+				
+				const	tx = await gameContract.cancelRound(updateData, {
 						value: updateFee,
 						nonce: nonce,
 					});
-				} else {
-					tx = await gameContract.cancelRound(roundId, updateData, {
-						value: updateFee,
-						nonce: nonce,
-					});
-				}
+				
 
 				receipt = await tx.wait();
 				console.log(`[${tokenConfig.name}] Successfully cancelled round ${roundId}! TX: ${receipt.hash}`);
