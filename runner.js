@@ -538,7 +538,7 @@ async function executeNormalRound(tokenConfig) {
 			receipt = await sendTxWithTimeout(gameContract.executeRound.bind(gameContract), [updateData], {
 				value: updateFee,
 				nonce
-			}, 5000);
+			}, 10000);
 
 			console.log(`[${tokenConfig.name}] Successfully executed round! TX: ${receipt.hash}`);
 		} catch (err) {
