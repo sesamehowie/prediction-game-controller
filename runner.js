@@ -11,13 +11,11 @@ import referralService from "./referralService.js";
 dotenv.config();
 
 const betPositionNames = ["none", "pump", "dump"];
-const abiPathBTC = "./abi/PredictionGameBTC.json";
 const abiPath = "./abi/PredictionGame.json";
 const monadRpc = process.env.MONAD_RPC;
 const pythOracleAddress = process.env.PYTH_ORACLE_ADDRESS;
 
 const predictionGameAbi = readJson(abiPath);
-const predictionGameAbiBTC = readJson(abiPathBTC);
 const pythAbi = ["function getUpdateFee(bytes[] calldata updateData) external view returns (uint256 feeAmount)"];
 
 // Configuration for 3 tokens with separate private keys
@@ -30,7 +28,7 @@ const TOKENS = [
 		priceFeedId: process.env.BTC_PRICE_FEED_ID,
 		priceExpo: 8,
 		operatorPrivateKey: process.env.BTC_OPERATOR_PRIVATE_KEY,
-		abi: predictionGameAbiBTC,
+		abi: predictionGameAbi,
 	},
 	{
 		name: "ETH",
